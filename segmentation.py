@@ -1,4 +1,3 @@
-from re import A
 import numpy as np
 from numpy.core.fromnumeric import searchsorted
 import torch

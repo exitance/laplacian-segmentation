@@ -1,5 +1,6 @@
 import os
 import numpy as np
+from numpy.linalg import eig
 
 eps = 1e-8
 
@@ -15,9 +16,13 @@ def normalized_laplacian(adjMatrix):
     I = np.eye(adjMatrix.shape[0])
     return I - np.matmul(msqrtD, np.matmul(adjMatrix, msqrtD))
 
-def ascending_eigenValue(M):
-    eigenvalue, _ = np.linalg.eig(M)
-    return np.sort(eigenvalue)
+def ascending_eigenValue(M, dim):
+    eigv, _ = np.linalg.eig(M)
+    eigv = np.sort(eigv)
+    v = np.zeros(dim)
+    v[0:eigv.size] = eigv
+    v[eigv.size:dim] = eigv[eigv.size-1]
+    return v
 
 def create_direcotry(path):
     folder = os.path.exists(path)
@@ -27,6 +32,16 @@ def create_direcotry(path):
         os.makedirs(path)
     else:
         print("folder %s exists" % (path))
+
+def get_num(filePath):
+    f = open(filePath)
+    verticesNum = 0
+    for line in f:
+        if line[0] == "v":
+            verticesNum += 1
+        if line[0] == "f":
+            break
+    return verticesNum
 
 def get_adjacent_matrix(filePath):
     f = open(filePath)
@@ -61,7 +76,26 @@ def get_segnum(filePath):
             seglable.append(x)
     return segnum
 
-def write_data_label(sourceDir, objectDir, workDir, labelList, normalized):
+def get_max_dim(sourceDir):
+    path = sourceDir + "/train"
+    files = os.listdir(path)
+    dim = 0
+    for file in files:
+        filePath = path + "/" + file
+        if not os.path.isdir(filePath):
+            num = get_num(path + "/" + file)
+            dim = max(num, dim)
+    path = sourceDir + "/test"
+    files = os.listdir(path)
+    for file in files:
+        filePath = path + "/" + file
+        if not os.path.isdir(filePath):
+            num = get_num(path + "/" + file)
+            dim = max(num, dim)
+    print("maximum dimension: {0}".format(dim))
+    return dim
+
+def append_data_label(sourceDir, objectDir, workDir, labelList, normalized, dim):
     path = sourceDir + "/" + workDir
     files = os.listdir(path)
     for file in files:
@@ -72,7 +106,7 @@ def write_data_label(sourceDir, objectDir, workDir, labelList, normalized):
                 laplacian = unnormalized_laplacian(adjMatrix)
             else:
                 laplacian = normalized_laplacian(adjMatrix)
-            eigenValues = ascending_eigenValue(laplacian)
+            eigenValues = ascending_eigenValue(laplacian, dim)
             lowerBound = 0-eps
             upperBound = 2+eps
             if eigenValues.min() < lowerBound:
@@ -80,18 +114,19 @@ def write_data_label(sourceDir, objectDir, workDir, labelList, normalized):
             if eigenValues.max() > upperBound:
                 print("{0} out of bound\n".format(eigenValues.max()))
             x = int(file.split(".")[0])
-            filePath = objectDir + "/" + workDir + "/" + str(x) + ".in"
-            f = open(filePath, "w")
+            filePath = objectDir + "/" + workDir + ".csv"
+            f = open(filePath, "a")
             s = ""
             for v in eigenValues:
-                s = s + str(v) + " "
+                s = s + str(v) + ","
             f.write(s)
-            f.write("\n")
             f.write(str(labelList[x-1]))
+            f.write("\n")
 
-def generate_eigenValue_data(sourceDir, objectDir, normalized):
+def generate_data(sourceDir, objectDir, normalized):
     # read mesh and segmentation data
     # get labels
+    create_direcotry(objectDir)
     path = sourceDir + "/seg"
     files = os.listdir(path)
     total = 0
@@ -109,24 +144,21 @@ def generate_eigenValue_data(sourceDir, objectDir, normalized):
             x = int(file.split(".")[0])
             labelList[x-1] = lable
 
-    workDir = "test"
-    create_direcotry(objectDir + "/" + workDir)
-    write_data_label(sourceDir, objectDir, workDir, labelList, normalized)
-    workDir = "train"
-    create_direcotry(objectDir + "/" + workDir)
-    write_data_label(sourceDir, objectDir, workDir, labelList, normalized)
-    files = os.listdir(path)
+    # get maximum number of vertices, that is laplacian's dimension
+    dimension = get_max_dim(sourceDir)
 
+    workDir = "test"
+    append_data_label(sourceDir, objectDir, workDir, labelList, normalized, dimension)
+    workDir = "train"
+    append_data_label(sourceDir, objectDir, workDir, labelList, normalized, dimension)
 
 if __name__ == '__main__':
-    
     cosegDir = "coseg"
-    # dataDir = "data"
-    dataDir = "data_normalized"
+    dataDir = "dataset/eig"
     dirs = os.listdir(cosegDir)
     for dir in dirs:
         print(dir)
         sourceDir = cosegDir + "/" + dir
         objectDir = dataDir + "/" + dir
         if os.path.isdir(sourceDir):
-            generate_eigenValue_data(sourceDir, objectDir, True)
+            generate_data(sourceDir, objectDir, True)
