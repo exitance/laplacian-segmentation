@@ -1,6 +1,8 @@
 import os
 import numpy as np
 
+eps = 1e-8
+
 def unnormalized_laplacian(adjMatrix):
     R = np.sum(adjMatrix, axis=1)
     degreeMatrix = np.diag(R)
@@ -71,6 +73,12 @@ def write_data_label(sourceDir, objectDir, workDir, labelList, normalized):
             else:
                 laplacian = normalized_laplacian(adjMatrix)
             eigenValues = ascending_eigenValue(laplacian)
+            lowerBound = 0-eps
+            upperBound = 2+eps
+            if eigenValues.min() < lowerBound:
+                print("{0} out of bound\n".format(eigenValues.min()))
+            if eigenValues.max() > upperBound:
+                print("{0} out of bound\n".format(eigenValues.max()))
             x = int(file.split(".")[0])
             filePath = objectDir + "/" + workDir + "/" + str(x) + ".in"
             f = open(filePath, "w")
