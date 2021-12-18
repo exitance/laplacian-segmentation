@@ -1,234 +1,222 @@
-import numpy as np
-from numpy.core.fromnumeric import searchsorted
+# PyTorch
 import torch
 import torch.nn as nn
+from torch.utils.data import Dataset, DataLoader
+
+# For data preprocess
 import numpy as np
-import pandas as pd
-from torch.utils.data import DataLoader, Dataset
-from sklearn.model_selection import train_test_split
-import matplotlib.pyplot as plt
-import random
+import csv
+import os
 import gc
 
-# Hyperparameters and Constants
-# training parameters
-n_epochs = 20
-learning_rate = 1e-4
+# For plotting
+import matplotlib.pyplot as plt
+from matplotlib.pyplot import figure
 
-batch_size = 64
-val_ratio = 0.2
-seed = 42
-input_dim = 6
-# the path where checkpoint saved
-model_path = ''
+myseed = 42069  # set a random seed for reproducibility
+torch.backends.cudnn.deterministic = True
+torch.backends.cudnn.benchmark = False
+np.random.seed(myseed)
+torch.manual_seed(myseed)
+if torch.cuda.is_available():
+    torch.cuda.manual_seed_all(myseed)
 
-# check device
 def get_device():
+    '''Get device (if GPU is available, use GPU)'''
     return 'cuda' if torch.cuda.is_available() else 'cpu'
 
-# fix random seed
-def same_seeds(seed):
-    torch.manual_seed(seed)
-    if torch.cuda.is_available():
-        torch.cuda.manual_seed(seed)
-        torch.cuda.manual_seed_all(seed)
-    np.random.seed(seed)
-    torch.backends.cudnn.benchmark = False
-    torch.backends.cudnn.deterministic = True
-
-# calculate curvature
-def curvature(data_eig, data):
-    for i in range(data_eig.shape[0]):
-        alpha = m.atan(data_eig[i][1] - data_eig[i][0])
-        len1 = m.sqrt(pow(data_eig[i][1] - data_eig[i][0], 2) + 4)
-        for j in range(1, data_eig.shape[1]-1):
-            k = data_eig[i][j+1] - data_eig[i][j]
-            a = m.atan(k)
-            alp = alpha - a
-            len2 = m.sqrt(pow(data_eig[i][j+1] - data_eig[i][j], 2) + 4)
-            train[i][j-1] = 2 * alp / (len1 + len2)
-            alpha = a
+# calculate curvature for polyline
+# k[j] = 2 * \alpha[j] / (l1[j] + l2[j])
+def curvature(eigv):
+    curv = np.zeros((eigv.shape[0], eigv.shape[1]-2))
+    for i in range(eigv.shape[0]):
+        # k--the slope of this line segment: (eigv[j] - eigv[j-1]) / (j-(j-1))
+        # beta--the angle between this line segment and the x-axis: arctan(k)
+        beta = np.arctan(eigv[i][1] - eigv[i][0])
+        # len1--the length of this line segment (j, eigv[j]), (j-1, eigv[j-1]) 
+        len1 = np.sqrt(pow(eigv[i][1] - eigv[i][0], 2) + 1)
+        for j in range(1, eigv.shape[1]-1):
+            betaNext = np.arctan(eigv[i][j+1] - eigv[i][j])
+            # the Normal turning angle \alph
+            # 
+            alpha = beta - betaNext
+            len2 = np.sqrt(pow(eigv[i][j+1] - eigv[i][j], 2) + 1)
+            curv[i][j-1] = 2 * alpha / (len1 + len2)
+            beta = betaNext
             len1 = len2
+    return curv
 
-# Preparing Data
-print('Loading data ...')
+class EigenvalueDataset(Dataset):
+    ''' Dataset for loading and preprocessing the eigenvalue dataset '''
+    def __init__(self,
+                 path,
+                 mode='train'):
+        self.mode = mode
 
-data_root=''
+        # Read data into numpy arrays
+        with open(path, 'r') as fp:
+            data = list(csv.reader(fp))
+            data = np.array(data).astype(float)
+            lable = np.array(data[:, -1]).astype(int)
+            data = np.array(data[:, 0:data.shape[1]-1]).astype(float)
+            data[:, 0] = 0 # every first eigenvalue is 0
+            data = curvature(data)
+            self.data = torch.FloatTensor(data)
+            self.label = torch.LongTensor(lable)
+            self.dim = self.data.shape[1]
 
-import math as m
-
-train_eig = np.load(data_root + '')
-train_eig.argsort() # eigenvalues in ascending order
-input_dim = train_eig.shape[1]
-train = np.zero((train_eig.shape[0], input_dim), dtype = np.float)
-curvature(train_eig, train)
-train_label = np.load(data_root + '')
-
-test_eig = np.load(data_root + '')
-test_eig.argsort()
-test = np.zero((test_eig.shape[0], input_dim), dtype = np.float)
-curvature(test_eig, test)
-
-print('Size of training data: {}'.format(train.shape))
-print('Size of testing data: {}'.format(test.shape))
-
-# Dataset
-class LaplacianDataset(Dataset):
-    def __init__(self, X, y=None):
-        self.data = torch.from_numpy(X).float()
-        if y is not None:
-            y = y.astype(np.int)
-            self.label = torch.LongTensor(y)
-        else:
-            self.label = None
+        print('Finished reading the {} set of Eigenvalue Dataset ({} samples found, each dim = {})'
+              .format(mode, len(self.data), self.dim))
 
     def __getitem__(self, index):
+        # Returns one sample at a time
         if self.label is not None:
             return self.data[index], self.label[index]
         else:
             return self.data[index]
 
     def __len__(self):
+        # Returns the size of the dataset
         return len(self.data)
 
-percent = int(train.shape[0] * (1 - val_ratio))
-train_x, train_y, val_x, val_y = train[:percent], train_label[:percent], train[percent:], train_label[percent:]
-print('Size of training set: {}'.format(train_x.shape))
-print('Size of validation set: {}'.format(val_x.shape))
+def prep_dataloader(path, mode, batch_size, n_jobs=0):
+    ''' Generates a dataset, then is put into a dataloader. '''
+    dataset = EigenvalueDataset(path, mode=mode)  # Construct dataset
+    dataloader = DataLoader(
+        dataset, batch_size,
+        shuffle=(mode == 'train'), drop_last=False,
+        num_workers=n_jobs, pin_memory=True)        # Construct dataloader
+    return dataloader
 
-train_set = LaplacianDataset(train_x, train_y)
-train_loader = DataLoader(dataset=train_set, batch_size=batch_size, shuffle=True) # only shuffle training data
-val_set = LaplacianDataset(train_x, train_y)
-val_loader = DataLoader(dataset=val_set, batch_size=batch_size, shuffle=False)
-
-del train, train_label, train_x, train_y, val_x, val_y
-gc.collect()
-
-# Create Model
+# Model
 class Segmentation(nn.Module):
-    def __init__(self):
+    def __init__(self, dim):
+        '''A simple fully-connected deep neural network'''
         super(Segmentation, self).__init__()
-        self.layer1 = nn.Linear(input_dim, )
-        self.layer2 = nn.Linear()
-        self.layer3 = nn.Linear()
-        self.out = nn.Linear()
+        self.layer1 = nn.Linear(dim, dim+10)
+        self.out = nn.Linear(dim+10, dim)
 
         self.act_fn = nn.Sigmoid()
 
     def forward(self, x):
+        '''Given input of size (batch_size x input_dim), compute output of the network'''
         x = self.layer1(x)
         x = self.act_fn(x)
-
-        x = self.layer2(x)
-        x = self.act_fn(x)
-                
-        x = self.layer3(x)
-        x = self.act_fn(x)
-
         x = self.out(x)
 
         return x
 
-train_loss = []
-valid_loss = []
-train_epochs_loss = []
-valid_epochs_loss = []
+# training method
+def train(train_loader, test_loader, model, num_epoch, criterion, optimizer, model_path, device):
+    best_acc = 0.0
+    for epoch in range(num_epoch):
+        train_acc = 0.0
+        train_loss = 0.0
+        test_acc = 0.0
+        test_loss = 0.0
 
-# Training
+        # training
+        model.train() # set the model to training mode
+        for i, data in enumerate(train_loader):
+            inputs, labels = data
+            inputs, labels = inputs.to(device), labels.to(device)
+            optimizer.zero_grad() 
+            outputs = model(inputs) 
+            batch_loss = criterion(outputs, labels)
+            _, train_pred = torch.max(outputs, 1)   # get the index of the class with the highest probability
+            batch_loss.backward()
+            optimizer.step() 
 
-# fix random seed for reproducibility
-same_seeds(seed)
+            train_acc += (train_pred.cpu() == labels.cpu()).sum().item()
+            train_loss += batch_loss.item()
 
+        # testing
+        if len(test_loader) > 0:
+            model.eval() # set the model to evaluation mode
+            with torch.no_grad():
+                for i, data in enumerate(test_loader):
+                    inputs, labels = data
+                    inputs, labels = inputs.to(device), labels.to(device)
+                    outputs = model(inputs)
+                    batch_loss = criterion(outputs, labels) 
+                    _, test_pred = torch.max(outputs, 1)
+                
+                    test_acc += (test_pred.cpu() == labels.cpu()).sum().item() # get the index of the class with the highest probability
+                    test_loss += batch_loss.item()
+
+                print('[{:03d}/{:03d}] Train Acc: {:3.6f} Loss: {:3.6f} | Test Acc: {:3.6f} loss: {:3.6f}'.format(
+                    epoch + 1, num_epoch, train_acc/len(train_loader.dataset), train_loss/len(train_loader.dataset), test_acc/len(test_loader.dataset), test_loss/len(test_loader.dataset)
+                ))
+
+                # if the model improves, save a checkpoint at this epoch
+                if test_acc > best_acc:
+                    best_acc = test_acc
+                    torch.save(model.state_dict(), model_path)
+                    print('saving model with acc {:.3f}'.format(best_acc/len(test_loader.dataset)))
+        else:
+            print('[{:03d}/{:03d}] Train Acc: {:3.6f} Loss: {:3.6f}'.format(
+                epoch + 1, num_epoch, train_acc/len(train_loader.dataset), train_loss/len(train_loader.dataset)
+            ))
+
+    # if not validating, save the last epoch
+    if len(test_loader) == 0:
+        torch.save(model.state_dict(), model_path)
+        print('saving model at last epoch')
+
+# make predict
+def predict(test_loader, model, device):
+    pred = []
+    model.eval()  # set the model to evaluation mode
+    with torch.no_grad():
+        for i, data in enumerate(test_loader):
+            inputs = data
+            inputs = inputs.to(device)
+            outputs = model(inputs)
+            _, test_pred = torch.max(outputs, 1)  # get the index of the class with the highest probability
+
+            for y in test_pred.cpu().numpy():
+                pred.append(y)
+    return pred
+
+# configures
+BATCH_SIZE = 20
+VAL_RATIO = 0.2
 # get device
 device = get_device()
 print(f'DEVICE: {device}')
+# training parameters
+num_epoch = 20          # number of training epoch
+learning_rate = 0.0001  # learning rate
 
-model = Segmentation().to(device)
-criterion = nn.CrossEntropyLoss()
-optimizer = torch.optim.Adam(model.parameters(), lr=learning_rate)
+os.makedirs('models', exist_ok=True)
 
-# start training
+dataset_root = 'dataset/eig'
+train_file = 'train.csv'
+test_file = 'test.csv'
+model_root = 'models'
+model_file = 'model.pth'
 
-best_acc = 0.0
-for epoch in range(n_epochs):
-    train_acc = 0.0
-    train_loss = 0.0
-    val_acc = 0.0
-    val_loss = 0.0
-    
+dirs = ['coseg_aliens', 'coseg_chairs', 'coseg_vases']
+
+for dir in dirs:
+    print('model for {0}:\n'.format(dir))
+    print('Loading data ...\n')
+    # the path where data loaded
+    dataset_path = dataset_root + '/' + dir
+    train_path = dataset_path + '/' + train_file
+    test_path = dataset_path + '/' + test_file
+    # load dataset
+    train_loader = prep_dataloader(train_path, 'train', BATCH_SIZE)
+    test_loader = prep_dataloader(test_path, 'test', BATCH_SIZE)
+    # the path where checkpoint saved
+    model_path = model_root + '/' + dir + '/' + model_file
+    os.makedirs(model_root + '/' + dir, exist_ok=True)    # The trained model will be saved to ./models/<dir>
     # training
-    model.train()
-    for i, data in enumerate(train_loader):
-        inputs, labels = data
-        inputs, labels = inputs.to(device), labels.to(device)
-        optimizer.zero_grad()
-        outputs = model(inputs)
-        outputs += 1
-        batch_loss = criterion(outputs, labels)
-        _, train_pred = torch.max(outputs, 1) # get the index of the class with the highest probability
-        batch_loss.backward()
-        optimizer.step()
-
-        train_acc += (train_pred.cpu() == labels.cpu()).sum().item()
-        train_loss += batch_loss.item()
-
-    # validation
-    if len(val_set) > 0:
-        model.eval()
-        with torch.no_grad():
-            for i, data in enumerate(val_loader):
-                inputs, labels = data
-                inputs, labels = inputs.to(device), labels.to(device)
-                outputs = model(inputs)
-                outputs += 1
-                batch_loss = criterion(outputs, labels)
-                _, val_pred = torch.max(outputs, 1)
-
-                val_acc += (val_pred.cpu() == labels.cpu()).sum().item()
-                val_loss += batch_loss.item()
-            
-            print('[{:03d}/{:03d}] Train Acc: {:3.6f} Loss: {:3.6f} | Val Acc: {:3.6f} loss: {:3.6f}'.format(
-                epoch + 1, n_epochs, train_acc/len(train_set), train_loss/len(train_loader), val_acc/len(val_set), val_loss/len(val_loader)
-            ))
-
-            # if the model improves, save a checkpoint at this epoch
-            if val_acc > best_acc:
-                best_acc = val_acc
-                torch.save(model.state_dict(), model_path)
-                print('saving model with acc {:.3f}'.format(best_acc/len(val_set)))
-    else:
-        print('[{:03d}/{:03d}] Train Acc: {:3.6f} Loss: {:3.6f}'.format(
-            epoch + 1, n_epochs, train_acc/len(train_set), train_loss/len(train_loader)
-        ))
-
-# if not validating save the last epoch
-if len(val_set) == 0:
-    torch.save(model.state_dict(), model_path)
-    print('saving model at last epoch')
-
-# Testing
-# create testing data
-test_set = LaplacianDataset(test, None)
-test_loader = DataLoader(test_set, batch_size=batch_size, shuffle=False)
-
-# create model and load weights from checkpoint
-model = Segmentation().to(device)
-model.load_state_dict(torch.load(model_path))
-
-# make prediction
-predict = []
-model.eval() # set the model to evaluation mode
-
-# Plot
-"""
-plt.figure(figsize=(12, 4))
-plt.subplot(121)
-plt.plot(train_loss[:])
-plt.title("train_loss")
-plt.subplot(122)
-plt.plot(train_epochs_loss[1:], '-o', label="train_loss")
-plt.plot(valid_epochs_loss[1:], '-o', label="valid_loss")
-plt.title("epochs_loss")
-plt.legend()
-plt.show()
-"""
+    # create model, define a loss function, and optimizer
+    model = Segmentation(train_loader.dataset.dim).to(device)
+    criterion = nn.CrossEntropyLoss()
+    optimizer = torch.optim.Adam(model.parameters(), lr=learning_rate)
+    print('Start training ...\n')
+    train(train_loader, test_loader, model, num_epoch, criterion, optimizer, model_path, device)
+    # create model and load weight from checkpoint to make predicts
+    # ...
